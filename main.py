@@ -1,7 +1,11 @@
 import asyncio
-import requests
+import threading
+from flask import Flask
 from telegram import Bot
-
+import requests
+from bs4 import BeautifulSoup
+import time
+import os
 
 
 # 🔑 DATOS DE TU BOT
@@ -10,53 +14,79 @@ CHAT_ID = 2068937462
 
 
 
-bot = Bot(token=TOKEN)
+DESCUENTO_MINIMO = 30  # puedes subirlo a 75 después
 
-async def enviar(texto):
+BUSQUEDAS = [
+    "https://listado.mercadolibre.cl/ofertas",
+    "https://listado.mercadolibre.cl/liquidacion",
+    "https://listado.mercadolibre.cl/outlet",
+    "https://listado.mercadolibre.cl/remate"
+]
+
+bot = Bot(token=TOKEN)
+precios_guardados = {}
+
+# ===== FLASK (para Render) =====
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot activo"
+
+def iniciar_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ===== BOT =====
+async def enviar_mensaje(texto):
     await bot.send_message(chat_id=CHAT_ID, text=texto)
 
-BUSQUEDAS = ["celular", "notebook", "televisor", "consola", "audifonos"]
+def revisar_ofertas():
+    while True:
+        for url in BUSQUEDAS:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers)
+            soup = BeautifulSoup(r.text, "html.parser")
+            items = soup.find_all("li", class_="ui-search-layout__item")
 
-headers = {"User-Agent": "Mozilla/5.0"}
+            for item in items:
+                try:
+                    titulo = item.find("h2").text
+                    link = item.find("a")["href"]
 
-while True:
-    for busqueda in BUSQUEDAS:
-        url = f"https://api.mercadolibre.com/sites/MLC/search?q={busqueda}&limit=50"
-        r = requests.get(url, headers=headers)
+                    precio_actual = item.find("span", class_="andes-money-amount__fraction").text
+                    precio_actual = int(precio_actual.replace(".", ""))
 
-        print("Estado:", r.status_code)
+                    descuento_tag = item.find("span", class_="andes-money-amount__discount")
+                    if not descuento_tag:
+                        continue
 
-        data = r.json()
+                    descuento = int(descuento_tag.text.replace("% OFF", "").replace(" ", ""))
 
-        if "results" not in data:
-            print("Bloqueado en:", busqueda)
-            continue
+                    print("Revisando:", titulo, descuento)
 
-        productos = data["results"]
+                    if descuento < DESCUENTO_MINIMO:
+                        continue
 
-        for p in productos:
-            titulo = p["title"]
-            precio = p["price"]
-            original = p.get("original_price")
+                    if link in precios_guardados and precio_actual >= precios_guardados[link]:
+                        continue
 
-            if not original:
-                continue
+                    precios_guardados[link] = precio_actual
 
-            descuento = int(100 - (precio * 100 / original))
-
-            if descuento >= 30:
-                mensaje = f"""
-🔥 OFERTA DETECTADA
+                    mensaje = f"""
+🔥 DESCUENTO DETECTADO
 {titulo}
-💰 ${precio}
+💲 ${precio_actual}
 📉 {descuento}% OFF
-🔗 {p['permalink']}
+🔗 {link}
 """
-                asyncio.run(enviar(mensaje))
+                    asyncio.run(enviar_mensaje(mensaje))
 
-    import time
-    time.sleep(300)
+                except:
+                    continue
 
+        time.sleep(300)
 
-
- 
+# ===== INICIO =====
+threading.Thread(target=revisar_ofertas).start()
+iniciar_web()
